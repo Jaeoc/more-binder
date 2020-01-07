@@ -1,0 +1,323 @@
+---
+title: "Figures main manuscript"
+author: "Heterogeneity in direct replications in psychology and its association with effect size"
+output: 
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 6, fig.asp = 1.3)
+```
+
+```{r load packages, data and source helper functions}
+if(!require(readr)){install.packages("readr")}
+if(!require(metafor)){install.packages("metafor")}
+if(!require(dplyr)){install.packages("dplyr")}
+if(!require(purrr)){install.packages("purrr")}
+if(!require(ggplot2)){install.packages("ggplot2")}
+if(!require(cowplot)){install.packages("cowplot")}
+if(!require(boot)){install.packages("boot")}
+
+library(readr) #To load data
+library(dplyr) #For data transformation
+library(purrr) #For data iteration
+library(metafor) #To run meta-analyses
+library(ggplot2) #Plot data
+library(cowplot) #Combine several plots into one
+library(boot) #Bootstrap confidence intervals for correlations
+
+dat <- read_csv("../data/collated_summary_data.csv")
+
+source("03_helper_functions_tables_figures.r") #Load functions to prep data for figures
+```
+
+## Figure 2
+
+```{r Density-plot-prep}
+#1) I2 plot----
+dens <- readRDS("../data/power_simulation_results.RDS")
+names(dens) <-  sort(unique(dat$effect))
+
+#Simulated data at various heterogeneity levels, prep for plotting
+I2_dist <- dens %>% 
+  bind_rows(.id = "effect") %>% 
+  rename(Heterogeneity = tau_index) %>% 
+  mutate(Heterogeneity = recode(Heterogeneity,
+                            '1' = "Zero",
+                            '2' = "Small",
+                            '3' = "Medium",
+                            '4' = "Large"),
+         Heterogeneity = as.factor(Heterogeneity))
+
+#Observed I2 estimates, i.e, results from main table, see table.rmd
+#Effects estimated with sourced function 'est_heterogeen_smd_raw'
+observed <- dat %>% 
+  split(.$effect) %>%  
+  map_dfr(est_heterogen_smd_raw, .id = "effect") %>% 
+  select(effect, I2 = s_I2) %>%
+  mutate(Heterogeneity = "Observed")
+```
+
+
+```{r Density-plot, fig.height=4, fig.width=6.47}
+I2_plot <- ggplot(I2_dist, aes(x = I2, group = Heterogeneity, fill = Heterogeneity, linetype = Heterogeneity)) +
+  geom_histogram(data = observed, aes(y = ..density.., x = I2), bins = 100, alpha = 1) +
+  geom_density(alpha = 0.3) +
+  theme_classic() +
+  coord_cartesian(xlim = c(0, 100))  +
+  scale_fill_brewer(palette = "Dark2",
+                    breaks = c("Zero", "Small", "Medium", "Large", "Observed"),
+                    labels = c("Zero (0%)", "Small (25%)", "Medium (50%)", "Large (75%)", "Observed")) +
+  scale_linetype_manual(values = c( "dotdash", "dotted", "solid", "solid", "dashed"),
+                        breaks = c("Zero", "Small", "Medium", "Large", "Observed"), 
+                        labels = c("Zero (0%)", "Small (25%)", "Medium (50%)", "Large (75%)", "Observed")) +
+  scale_color_brewer(palette = "Dark2", 
+                     breaks = c("Zero", "Small", "Medium", "Large", "Observed"),
+                     labels = c("Zero (0%)", "Small (25%)", "Medium (50%)", "Large (75%)", "Observed")) +
+  theme(legend.position = c(0.85, 0.71),
+        legend.background = element_rect(linetype = "solid", color = "black")) +
+  scale_y_continuous(name = "Density") +
+  scale_x_continuous(name = expression(paste(I^2," index", sep = ""))) +
+  guides(fill = guide_legend(override.aes = list(alpha = c(rep(0.3, 4), 1))))
+
+I2_plot
+# ggsave("../figures/density-I2.png", dpi = 600, height =  4, width = 6.47, device = cairo_pdf())
+
+
+```
+
+Figure 2. Simulated $I^2$  densities across 67 meta-analyses for zero, small, medium, and large heterogeneity according to the definitions of Higgins (2003), and the distribution of the observed $I^2$ estimates (bars) for the 67 meta-analyses. Each simulated density consists of approximately 670,000 estimates. 
+
+
+## Figure 3: correlations per effect type
+
+```{r corr_per_effect_type-prep}
+
+#Function 'est_heterogen_smd_raw' is sourced, see also tables.rmd
+tau2_per_type <- dat %>% #First compute meta-analytic results for all effects (will save: SMDs results)
+  split(.$effect) %>%  
+  map_dfr(est_heterogen_smd_raw, .id = "effect") 
+
+
+#Raw mean differences to SMD
+MD_standardized <- dat %>% 
+  filter(outcomes1_2 == "mean _ SD") %>% #Note, drops Mean _ SE studies (two) since no method in metafor to convert into standardized mean differences
+  split(.$effect) %>% 
+  map_dfr(MD_fit, .id = "effect") #MD_fit function is sourced
+
+#effects that were originally transformed from OR to SMD by ML1 which we refit as OR
+OR2d <- c('Allowed vs. forbidden', 'Gain vs. loss framing', 
+           'Norm of reciprocity', 'Low vs. high category scales') 
+
+#odds ratio effects in ML2 we will fit as OR
+ml2_or <- c("Affect & Risk", "Trolley Dilemma 1", "Framing", "Trolley Dilemma 2") 
+
+#Risk differences from RRR1 that can be fit as odds ratios as well
+rd_effects <- c("Verbal overshadowing 1", "Verbal overshadowing 2")
+
+log_odds_ratios <- dat %>% 
+  filter(effect %in% c(OR2d, ml2_or, rd_effects)) %>% 
+  split(.$effect) %>% 
+  map_dfr(log_or_fit, .id = "effect") #log_or_fit function is sourced
+
+
+tau_per_type <- dat %>% #This is to add the effect_type names
+  select(effect, effect_type) %>% 
+  distinct() %>% #get unique rows
+  mutate(effect_type = recode(effect_type, 
+                              d = "Standardized Mean Difference")) %>% 
+  left_join(tau2_per_type) %>% #Add the meta-analytic results
+  filter(!effect %in% c(log_odds_ratios$effect, MD_standardized$effect)) %>% #drop old odds ratio effects and unstandardized MD
+  bind_rows(MD_standardized) %>% #add MD after standardization
+  bind_rows(log_odds_ratios) %>% #add odds ratios
+  mutate(effect_type = ifelse(effect %in% MD_standardized$effect, "Standardized Mean Difference", effect_type),
+         effect_type = ifelse(effect %in% log_odds_ratios$effect, "Log Odds Ratio", effect_type),
+         eff_size = abs(eff_size), #need the absolute values for plotting
+         tau = sqrt(tau2)) %>% 
+  filter(effect_type %in% c("Standardized Mean Difference", "Log Odds Ratio"))
+
+
+#lables
+set.seed(435) #for the bootstrapping
+fig3_ci <- tau_per_type %>% 
+  split(.$effect_type) %>% 
+  map_dfr(bootfitter, .id = "effect_type") #bootfitter is a sourced function
+
+labels <- tau_per_type %>% #row 1:2 = tau2, row 3:4 = I2, row 5:6 = H2
+  split(.$effect_type) %>% 
+  map_dfr(fitter, .id = "effect_type") %>% #fitter is a sourced function
+  mutate(lab = paste0("r = ", r, " ", fig3_ci$ci)) #put output into one variable for improved plotting
+
+
+```
+
+
+```{r corr_per_effect_type-plot, cache = FALSE}
+#tau plot----
+tau_facet <- ggplot(tau_per_type, aes(x = eff_size, y = tau)) + 
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") + #to set alpha for the line geom_line must be used rather than geom_smooth
+  geom_text(data = labels[labels$index == "tau",], aes(label = lab), x = -Inf, y = Inf, hjust = -0.05, vjust = 2, size = 3.5, fontface = "italic", alpha = .6) + #hjust and vjust can be used to annotate the same position in all facets even though the scale are different
+  scale_y_continuous(name = expression(paste("Between Studies Standard Deviation ", italic(tau)))) +
+  scale_x_continuous(name = "Absolute Effect Size") +
+  theme_classic() +
+  theme(strip.background = element_blank(), #remove box around titles
+        strip.text = element_text(size = 12),
+        panel.border = element_rect(fill = NA, colour = "black", #add box around plots
+                                    size = 0.5, linetype = "solid")) + 
+  facet_wrap(~effect_type, nrow = 2, scales = "free") #use free scales since scales are different
+
+#I2plot----
+I2_facet <- ggplot(tau_per_type, aes(x = eff_size, y = s_I2)) + 
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") + #to set alpha for the line geom_line must be used rather than geom_smooth
+  geom_text(data = labels[labels$index == "I2",], aes(label = lab), x = -Inf, y = Inf, hjust = -0.05, vjust = 2, size = 3.5, fontface = "italic", alpha = .6) + #hjust and vjust can be used to annotate the same position in all facets even though the scale are different
+  scale_y_continuous(name = expression(paste(italic(I)^2, " Index"))) +
+  scale_x_continuous(name = "Absolute Effect Size") +
+  coord_cartesian(ylim = c(0, 100)) +
+  theme_classic() +
+  theme(strip.background = element_blank(), #remove box around titles
+        strip.text = element_text(size = 12),
+        panel.border = element_rect(fill = NA, colour = "black", #add box around plots
+                                    size = 0.5, linetype = "solid")) + 
+  facet_wrap(~effect_type, nrow = 2, scales = "free") #use free scales since scales are different
+
+#H2plot----
+H2_facet <- ggplot(tau_per_type, aes(x = eff_size, y = H2)) + 
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") + #to set alpha for the line geom_line must be used rather than geom_smooth
+  geom_text(data = labels[labels$index == "H2",], aes(label = lab), x = -Inf, y = Inf, hjust = -0.05, vjust = 2, size = 3.5, fontface = "italic", alpha = .6) + #hjust and vjust can be used to annotate the same position in all facets even though the scale are different
+  scale_y_continuous(name = expression(paste(italic(H)^2, " Index"))) +
+  scale_x_continuous(name = "Absolute Effect Size") +
+  theme_classic() +
+  theme(strip.background = element_blank(), #remove box around titles
+        strip.text = element_text(size = 12),
+        panel.border = element_rect(fill = NA, colour = "black", #add box around plots
+                                    size = 0.5, linetype = "solid")) + 
+  facet_wrap(~effect_type, nrow = 2, scales = "free") #use free scales since scales are different
+
+#combined----
+combo <- cowplot::plot_grid(tau_facet, I2_facet, H2_facet, labels = "AUTO")
+# ggsave("../figures/effect-het.png", dpi = 600, height =  7, width = 7)
+combo
+```
+
+Figure 3. The Pearson correlation between absolute effect size and A) $\hat{\tau}$, B) $I^2$ and C) $H^2$ respectively for 40 effects that were measured as mean or standardized mean differences and 10 effects measured as odds ratios or risk differences from 13 pre-registered multi-lab replication projects. Effects reported as mean differences were standardized and odds ratios/risk differences computed as log odds ratios. Square brackets contain 95% bootstrapped percentile confidence intervals. Code to reproduce figure: osf.io/zuwpg/?view_only=e6639d8d4f924739a7310782fbbb4e06
+
+
+```{r cor_het_effect_size, eval= FALSE}
+
+#This section gives the correlations and values reported in the section 'Heterogeneity and effect sizes' in the main manuscript (not printed if .rmd is knit)
+
+#1. Standardized mean differences----
+SMDs <- tau_per_type %>% #tau_per_type object from code section two up 'cor_per_effect_type_prep'
+  filter(effect_type == "Standardized Mean Difference") 
+
+cor.test(SMDs$tau, SMDs$eff_size) #pearson tau2
+cor.test(SMDs$s_I2, SMDs$eff_size) #pearson I2
+cor.test(SMDs$H2, SMDs$eff_size) #pearson H2
+
+cor.test(SMDs$tau, SMDs$eff_size, method = "spearman") #spearman
+cor.test(SMDs$s_I2, SMDs$eff_size, method = "spearman") #spearman
+cor.test(SMDs$H2, SMDs$eff_size, method = "spearman") #spearman
+
+
+##Excluding anchoring effects
+dropped_anchoring <- SMDs %>%
+  filter(!grepl("Anchoring", effect))
+
+cor.test(dropped_anchoring$tau, dropped_anchoring$eff_size) #pearson
+cor.test(dropped_anchoring$s_I2, dropped_anchoring$eff_size) #pearson
+cor.test(dropped_anchoring$H2, dropped_anchoring$eff_size) #pearson
+
+#1.05 When ES not sig. diff from zero----
+##When effect size not sig diff from 0 (alpha = .05), what is average heterogeneity?
+nrow(SMDs[SMDs$eff_size_p > 0.05,]) #20/40 SMDs have ES not sig. diff from zero
+sum(SMDs$tau[SMDs$eff_size_p > 0.05] == 0) #13/20 of these have taus == 0
+
+mean(SMDs$tau[SMDs$eff_size_p > 0.05]) #for tau = 0.017
+mean(SMDs$s_I2[SMDs$eff_size_p > 0.05]) #I2 = 3.49
+mean(SMDs$H2[SMDs$eff_size_p > 0.05]) #H2 = 0.89
+
+SMDs_not_sig <- SMDs[SMDs$eff_size_p > 0.05,]$effect
+
+dat %>% filter(effect %in% SMDs_not_sig) %>% #amongst the non-sig SMDS
+  group_by(effect) %>% 
+  summarize(K = n()) %>% #compute number of labs (K) per effect
+  ungroup() %>% 
+  summarize(mean_k = mean(K), #average number of K = 32.8
+            median = quantile(K)['50%']) #median 22.5
+
+#% estimates that should be non-zero under central chi-square distribution. For I2 any effect size where Q <= DF ->  I2 zero
+pchisq(23, 23, lower.tail = FALSE)
+
+#logs
+logOR <- tau_per_type %>% #tau_per_type object from code section two up 'cor_per_effect_type_prep'
+  filter(effect_type == "Log Odds Ratio") 
+
+logOR[logOR$eff_size_p > 0.05,] #only 1 log odds ratio not signifcant. tau = 0.13, I2 = 11.8, H2 = 1.05
+
+#bootstrap confidence intervals
+#code contribution by Amir Abdol
+
+
+#1.1 I2 confidence intervals----
+
+
+#bootfit <- boot(data=SMDs, statistic=pear_I2, R=1000, formula= ~ eff_size + s_I2) #see Fig 3
+#I2_ci_pears <- boot.ci(bootfit, type=c("perc", "bca")) #percentile and adjusted percental method (BCa)
+
+
+#Excluding anchoring effects
+set.seed(234)
+bootfit <- boot(data=dropped_anchoring, statistic=pear_I2, R=1000, formula= ~ eff_size + s_I2) #statistic function is sourced
+
+I2_dropped_ci_pears <- boot.ci(bootfit, type=c("perc", "bca")) #percentile and adjusted percental method (BCa)
+
+#1.2 Tau confidence intervals----
+
+# bootfit <- boot(data=tau_per_type, statistic=pear_tau, R=1000, formula= ~ eff_size + tau2) #see Fig 3
+# tau2_ci_pears <- boot.ci(bootfit, type=c("perc", "bca"))
+
+#Excluding anchoring effects
+cor.test(dropped_anchoring$tau2, dropped_anchoring$eff_size)
+
+set.seed(423)
+bootfit <- boot(data=dropped_anchoring, statistic=pear_tau, R=1000, formula= ~ eff_size + tau)
+tau_dropped_ci_pears <- boot.ci(bootfit, type=c("perc", "bca")) #percentile and adjusted percental method (BCa)
+
+
+#1.3 H2 confidence intervals----
+set.seed(342)
+bootfit <- boot(data=tau_per_type, statistic=pear_H2, R=1000, formula= ~ eff_size + H2)
+H2_ci_pears <- boot.ci(bootfit, type=c("perc", "bca"))
+
+
+
+#1.4 spearman bootstrap CIs----
+#First for I2
+spear_I2 <- function(formula, data, indices){ #spearman
+     d <- data[indices,]
+     fit <- cor.test(formula = ~ s_I2 + eff_size, data=d, method = "spearman")
+     return(fit$estimate)
+}
+
+set.seed(241)
+options(warn=-1)
+bootfit <- boot(data=tau_per_type, statistic=spear_I2, R=1000, formula= ~ eff_size + s_I2)
+options(warn=0)
+
+I2_ci_spear <- boot.ci(bootfit, type=c("perc", "bca"))
+
+#Second for tau
+
+set.seed(5233)
+options(warn=-1)
+bootfit <- boot(data=tau_per_type, statistic=spear_tau, R=1000, formula= ~ eff_size + tau)
+options(warn=0)
+
+tau_ci_spear <- boot.ci(bootfit, type=c("perc", "bca"))
+
+```
+
